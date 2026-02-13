@@ -56,7 +56,7 @@ st.markdown("""
         border-top: 2px solid #30363d; z-index: 9999;
     }
 </style>
-<div class="footer">SSC Science Excellence Portal | Made by Imran</div>
+<div class="footer">Made by Imran</div>
 """, unsafe_allow_html=True)
 
 # --- 3. SESSION STATE MANAGEMENT ---
@@ -223,3 +223,4 @@ elif st.session_state.submitted:
         st.session_state.submitted = False
         st.session_state.user_answers = {}
         st.rerun()
+
