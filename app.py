@@ -2,409 +2,307 @@ import streamlit as st
 import pandas as pd
 import time
 from datetime import datetime
-import base64
-from io import BytesIO
 
-# Try importing FPDF for PDF generation, handle if missing
+# Try importing FPDF for PDF generation
 try:
     from fpdf import FPDF
     HAS_PDF_LIB = True
 except ImportError:
     HAS_PDF_LIB = False
 
-# --- 1. CONFIGURATION & STATE ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(
-    page_title="Science Pro | CBT Exam",
-    page_icon="🧬",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="FastExam",
+    page_icon="⚡",
+    layout="centered",
+    initial_sidebar_state="collapsed"
 )
 
-# --- 2. ADVANCED CSS (Glassmorphism & Clean UI) ---
+# --- 2. FAST UI CSS ---
 st.markdown("""
 <style>
-    /* Main Background */
-    .stApp { background-color: #0e1117; color: #e6edf3; }
+    /* Global Clean Theme */
+    .stApp { background-color: #ffffff; color: #1f1f1f; font-family: 'Segoe UI', sans-serif; }
 
-    /* Question Card */
-    .q-card {
-        background: #161b22; border: 1px solid #30363d;
-        border-radius: 12px; padding: 30px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.3); margin-bottom: 20px;
+    /* Sticky Header for Timer & Title */
+    .sticky-header {
+        position: fixed; top: 0; left: 0; width: 100%;
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(10px);
+        border-bottom: 2px solid #e0e0e0;
+        padding: 15px 20px;
+        z-index: 99999;
+        display: flex; justify-content: space-between; align-items: center;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
     }
-    .q-header { color: #58a6ff; font-size: 14px; font-weight: bold; letter-spacing: 1px; margin-bottom: 10px; }
-    .q-text { font-size: 22px; font-weight: 600; line-height: 1.5; color: #ffffff; margin-bottom: 20px; }
+    .header-title { font-size: 24px; font-weight: 800; color: #000; letter-spacing: -1px; }
+    .header-timer { font-size: 20px; font-weight: 600; color: #d93025; font-variant-numeric: tabular-nums; }
+    
+    /* Spacer to prevent content hiding behind header */
+    .header-spacer { height: 80px; }
 
-    /* Navigation Buttons */
-    .stButton button { border-radius: 8px; font-weight: 600; }
-    
-    /* Sidebar Palette */
-    .palette-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 10px; }
-    .palette-item {
-        padding: 8px; text-align: center; border-radius: 4px; font-size: 12px; font-weight: bold; cursor: default;
-        color: white; border: 1px solid rgba(255,255,255,0.1);
+    /* Question Card Styling */
+    .q-container {
+        background: #f8f9fa; border: 1px solid #e9ecef;
+        padding: 20px; border-radius: 8px; margin-bottom: 25px;
+    }
+    .q-title { font-weight: 700; font-size: 18px; margin-bottom: 12px; color: #202124; }
+
+    /* Custom Minimal Footer */
+    footer { visibility: hidden; }
+    .imran-footer {
+        text-align: center; padding: 20px; color: #9aa0a6; font-size: 12px;
+        border-top: 1px solid #eee; margin-top: 50px;
     }
     
-    /* Status Colors */
-    .status-active { border: 2px solid #58a6ff; box-shadow: 0 0 8px #58a6ff; }
-    .status-answered { background-color: #238636; }
-    .status-review { background-color: #d29922; }
-    .status-skipped { background-color: #21262d; }
-    
-    /* Hide Default Header */
-    header[data-testid="stHeader"] {visibility: hidden;}
-    footer {visibility: hidden;}
+    /* Hide Streamlit elements */
+    #MainMenu {visibility: hidden;}
+    .stDeployButton {display:none;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. SMARTER FUNCTIONS ---
+# --- 3. SMART FUNCTIONS ---
 
-def smart_parse_columns(df):
-    """
-    Intelligently maps CSV columns to required fields regardless of exact casing.
-    Returns standardized DataFrame or None if critical columns missing.
-    """
-    df.columns = [c.strip() for c in df.columns]
-    
-    # Keyword mapping priority
-    mappings = {
-        'Question': ['question', 'q', 'query', 'problem'],
-        'Option A': ['option a', 'opt a', 'a', '(a)'],
-        'Option B': ['option b', 'opt b', 'b', '(b)'],
-        'Option C': ['option c', 'opt c', 'c', '(c)'],
-        'Option D': ['option d', 'opt d', 'd', '(d)'],
-        'Correct Answer': ['correct answer', 'answer', 'ans', 'key', 'solution']
-    }
-    
-    new_cols = {}
-    found_cols = {c.lower(): c for c in df.columns}
-    
-    for standard, keywords in mappings.items():
-        match = None
-        for k in keywords:
-            if k in found_cols:
-                match = found_cols[k]
-                break
-        if match:
-            new_cols[standard] = match
-    
-    # Verify we have at least Question, Answer and 2 Options
-    if 'Question' in new_cols and 'Correct Answer' in new_cols:
-        # Renaming
-        rename_map = {v: k for k, v in new_cols.items()}
-        return df.rename(columns=rename_map)
-    return None
+@st.cache_data
+def smart_parse_csv(file):
+    """Parses CSV intelligently, mapping columns regardless of case."""
+    try:
+        df = pd.read_csv(file)
+        df.columns = [c.strip() for c in df.columns]
+        
+        # Mapping Dictionary
+        col_map = {}
+        required = {'Question': ['question', 'q', 'problem'], 
+                    'Correct Answer': ['answer', 'correct', 'key', 'ans']}
+        
+        # Find columns
+        lower_cols = {c.lower(): c for c in df.columns}
+        
+        for std_name, aliases in required.items():
+            found = False
+            for alias in aliases:
+                if alias in lower_cols:
+                    col_map[std_name] = lower_cols[alias]
+                    found = True
+                    break
+            if not found: return None # Missing critical column
 
-def generate_error_pdf(results, df):
-    """Generates a PDF of WRONG answers only."""
-    if not HAS_PDF_LIB:
+        # Rename critical columns
+        df = df.rename(columns={v: k for k, v in col_map.items()})
+        
+        # Ensure options exist, fill if missing
+        for opt in ['Option A', 'Option B', 'Option C', 'Option D']:
+            # Search for options fuzzily
+            opt_key = opt.lower()
+            if opt_key in lower_cols:
+                df = df.rename(columns={lower_cols[opt_key]: opt})
+            elif opt not in df.columns:
+                df[opt] = None # Create empty if missing
+                
+        return df
+    except:
         return None
 
-    class PDF(FPDF):
-        def header(self):
-            self.set_font('Arial', 'B', 15)
-            self.cell(0, 10, 'Exam Correction Report', 0, 1, 'C')
-            self.ln(5)
+def generate_wrong_answers_pdf(results, df):
+    """Generates PDF of ONLY wrong answers."""
+    if not HAS_PDF_LIB: return None
 
-    pdf = PDF()
+    pdf = FPDF()
     pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", size=11)
-
-    wrong_indices = [i for i, r in results.items() if not r['correct']]
     
-    if not wrong_indices:
-        pdf.cell(0, 10, "Great job! No incorrect answers found.", 0, 1)
+    # Title
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, "FastExam - Improvement Report", 0, 1, 'C')
+    pdf.ln(5)
+
+    # Filter Wrong Answers
+    wrong_items = [(i, res) for i, res in results.items() if not res['is_correct']]
+    
+    if not wrong_items:
+        pdf.set_font("Arial", size=12)
+        pdf.cell(0, 10, "Excellent! No incorrect answers to review.", 0, 1)
         return pdf.output(dest='S').encode('latin-1')
 
-    count = 1
-    for idx in wrong_indices:
-        row = df.iloc[idx]
-        user_ans = results[idx]['user_ans']
-        
-        pdf.set_font("Arial", 'B', 12)
-        # Multi_cell handles text wrapping
-        pdf.multi_cell(0, 8, f"{count}. {row['Question']}")
-        pdf.ln(2)
-        
-        pdf.set_font("Arial", size=10)
-        pdf.cell(0, 6, f"A) {row.get('Option A', '-')}", 0, 1)
-        pdf.cell(0, 6, f"B) {row.get('Option B', '-')}", 0, 1)
-        pdf.cell(0, 6, f"C) {row.get('Option C', '-')}", 0, 1)
-        pdf.cell(0, 6, f"D) {row.get('Option D', '-')}", 0, 1)
-        pdf.ln(2)
-        
-        pdf.set_text_color(200, 50, 50) # Red
-        pdf.cell(0, 6, f"Your Answer: {user_ans}", 0, 1)
-        
-        pdf.set_text_color(50, 150, 50) # Green
-        pdf.cell(0, 6, f"Correct Answer: {row['Correct Answer']}", 0, 1)
-        
-        pdf.set_text_color(0, 0, 0) # Reset
-        pdf.ln(8)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(5)
-        count += 1
-        
-    return pdf.output(dest='S').encode('latin-1')
+    pdf.set_font("Arial", size=10)
+    pdf.multi_cell(0, 5, f"Total Incorrect: {len(wrong_items)}")
+    pdf.ln(5)
 
-# --- 4. SESSION MANAGEMENT ---
-if 'session' not in st.session_state:
-    st.session_state.session = {
-        'state': 'SETUP', # SETUP, RUNNING, SUBMITTED
-        'df': None,
-        'current_q': 0,
-        'answers': {}, # {index: answer}
-        'marked': set(),
-        'start_time': None,
-        'duration': 0
-    }
-
-S = st.session_state.session
-
-# --- PHASE 1: SETUP & UPLOAD ---
-if S['state'] == 'SETUP':
-    col1, col2 = st.columns([1, 2], gap="large")
-    with col1:
-        st.image("https://cdn-icons-png.flaticon.com/512/3069/3069172.png", width=150)
-        st.title("Pro Exam Portal")
-        st.caption("Advanced CBT System")
-    
-    with col2:
-        st.markdown("### 📂 Load Question Bank")
+    for idx, (q_idx, res) in enumerate(wrong_items, 1):
+        row = df.iloc[q_idx]
         
-        # 1. Try Local File
-        try:
-            local_df = pd.read_csv("questions.csv")
-            local_df = smart_parse_columns(local_df)
-            file_status = "✅ 'questions.csv' found & parsed."
-        except:
-            local_df = None
-            file_status = "⚠️ No local file found."
-
-        # 2. File Uploader
-        uploaded_file = st.file_uploader("Or upload your CSV", type="csv")
-        
-        df = None
-        if uploaded_file:
-            try:
-                raw = pd.read_csv(uploaded_file)
-                df = smart_parse_columns(raw)
-                if df is None:
-                    st.error("CSV must contain 'Question' and 'Correct Answer' columns.")
-            except:
-                st.error("Invalid CSV file.")
-        elif local_df is not None:
-            df = local_df
-
-        if df is not None:
-            st.success(f"Loaded {len(df)} questions successfully!")
-            st.info(f"Parsing Status: Columns identified: {list(df.columns)}")
-            
-            S['duration'] = st.number_input("Exam Duration (Minutes)", min_value=1, value=len(df), step=1)
-            
-            if st.button("🚀 START EXAM", type="primary", use_container_width=True):
-                S['df'] = df
-                S['state'] = 'RUNNING'
-                S['start_time'] = time.time()
-                st.rerun()
-
-# --- PHASE 2: EXAM INTERFACE ---
-elif S['state'] == 'RUNNING':
-    
-    # Logic: Timer
-    elapsed = time.time() - S['start_time']
-    remaining = (S['duration'] * 60) - elapsed
-    
-    if remaining <= 0:
-        S['state'] = 'SUBMITTED'
-        st.rerun()
-
-    # --- SIDEBAR: NAVIGATION & STATUS ---
-    with st.sidebar:
-        # JavaScript Timer (No Rerun Loop)
-        st.markdown(f"""
-        <div style="text-align:center; border:1px solid #30363d; border-radius:8px; padding:10px; background:#0d1117;">
-            <div style="font-size:12px; color:#8b949e;">REMAINING TIME</div>
-            <div id="timer" style="font-size:24px; font-weight:bold; color:#f2cc60;">--:--</div>
-        </div>
-        <script>
-        var rem = {remaining};
-        setInterval(function() {{
-            rem--;
-            var m = Math.floor(rem / 60);
-            var s = Math.floor(rem % 60);
-            if (rem >= 0) {{
-                document.getElementById("timer").innerHTML = (m<10?"0"+m:m) + ":" + (s<10?"0"+s:s);
-            }}
-        }}, 1000);
-        </script>
-        """, unsafe_allow_html=True)
-
-        st.markdown("### 🧭 Question Palette")
-        
-        # Render Palette
-        cols = st.columns(5)
-        # Using pure HTML for grid because st.columns inside sidebar loop is slow
-        html_grid = '<div class="palette-grid">'
-        for i in range(len(S['df'])):
-            style = "status-skipped"
-            if i == S['current_q']: style = "status-active"
-            elif i in S['marked']: style = "status-review"
-            elif i in S['answers']: style = "status-answered"
-            
-            html_grid += f'<div class="palette-item {style}">{i+1}</div>'
-        html_grid += '</div>'
-        st.markdown(html_grid, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div style="margin-top:15px; font-size:11px; display:flex; justify-content:space-between; color:#8b949e;">
-            <span>🟦 Current</span> <span>🟩 Done</span> <span>🟨 Review</span>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.write("---")
-        if st.button("🏁 Finish Exam", type="primary", use_container_width=True):
-            S['state'] = 'SUBMITTED'
-            st.rerun()
-
-    # --- MAIN CONTENT: QUESTION CARD ---
-    # Progress Bar
-    p = len(S['answers']) / len(S['df'])
-    st.progress(p, text=f"Progress: {len(S['answers'])}/{len(S['df'])}")
-
-    q_idx = S['current_q']
-    row = S['df'].iloc[q_idx]
-    
-    # Card
-    with st.container():
-        st.markdown(f"""
-        <div class="q-card">
-            <div class="q-header">QUESTION {q_idx + 1}</div>
-            <div class="q-text">{row['Question']}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Question
+        pdf.set_font("Arial", 'B', 11)
+        pdf.multi_cell(0, 6, f"{idx}. {row['Question']}")
         
         # Options
-        options = []
-        for col in ['Option A', 'Option B', 'Option C', 'Option D']:
-            if col in row and pd.notna(row[col]):
-                options.append(str(row[col]))
+        pdf.set_font("Arial", size=10)
+        opts = [f"A) {row.get('Option A','')}", f"B) {row.get('Option B','')}", 
+                f"C) {row.get('Option C','')}", f"D) {row.get('Option D','')}"]
+        for opt in opts:
+            if str(opt).strip() not in ['None', 'nan', '']:
+                pdf.cell(0, 5, str(opt), 0, 1)
         
-        # Handle state of Radio button
-        sel_idx = None
-        current_ans = S['answers'].get(q_idx)
-        if current_ans in options:
-            sel_idx = options.index(current_ans)
-
-        val = st.radio(
-            "Select Answer:", 
-            options, 
-            index=sel_idx, 
-            key=f"q_radio_{q_idx}",
-            label_visibility="collapsed"
-        )
+        # Answers
+        pdf.ln(2)
+        pdf.set_text_color(220, 53, 69) # Red
+        pdf.cell(0, 5, f"Your Answer: {res['user_ans']}", 0, 1)
+        pdf.set_text_color(40, 167, 69) # Green
+        pdf.cell(0, 5, f"Correct Answer: {row['Correct Answer']}", 0, 1)
         
-        # Save Answer immediately
-        if val: S['answers'][q_idx] = val
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(5)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(5)
 
-    # --- FOOTER: CONTROLS ---
-    col_l, col_m, col_r = st.columns([1, 2, 1])
+    return pdf.output(dest='S').encode('latin-1')
+
+# --- 4. APP LOGIC ---
+
+if 'status' not in st.session_state:
+    st.session_state.status = 'UPLOAD' # UPLOAD -> EXAM -> RESULT
+    st.session_state.start_time = None
+    st.session_state.df = None
+
+# --- PHASE 1: UPLOAD ---
+if st.session_state.status == 'UPLOAD':
+    st.title("⚡ FastExam Setup")
     
-    with col_l:
-        if st.button("⬅️ PREV", use_container_width=True, disabled=q_idx==0):
-            S['current_q'] -= 1
-            st.rerun()
-            
-    with col_m:
-        is_marked = q_idx in S['marked']
-        btn_txt = "❌ Unmark Review" if is_marked else "🚩 Mark for Review"
-        if st.button(btn_txt, use_container_width=True):
-            if is_marked: S['marked'].remove(q_idx)
-            else: S['marked'].add(q_idx)
-            st.rerun()
-            
-    with col_r:
-        if q_idx < len(S['df']) - 1:
-            if st.button("NEXT ➡️", use_container_width=True):
-                S['current_q'] += 1
+    # Auto-load 'questions.csv' if exists
+    try:
+        local_df = smart_parse_csv("questions.csv")
+        if local_df is not None:
+            st.success("✅ 'questions.csv' loaded automatically.")
+            st.session_state.df = local_df
+    except:
+        pass
+
+    # File Uploader
+    if st.session_state.df is None:
+        up = st.file_uploader("Upload CSV", type=['csv'])
+        if up:
+            df = smart_parse_csv(up)
+            if df is not None:
+                st.session_state.df = df
                 st.rerun()
+            else:
+                st.error("Could not parse CSV. Ensure 'Question' and 'Answer' columns exist.")
+    
+    if st.session_state.df is not None:
+        if st.button("Start Exam", type="primary", use_container_width=True):
+            st.session_state.status = 'EXAM'
+            st.session_state.start_time = time.time()
+            st.rerun()
 
-# --- PHASE 3: RESULTS & ANALYTICS ---
-elif S['state'] == 'SUBMITTED':
-    st.title("📊 Exam Results")
+# --- PHASE 2: EXAM (SINGLE PAGE FORM) ---
+elif st.session_state.status == 'EXAM':
+    df = st.session_state.df
     
-    correct = 0
-    results_detail = {} # Store details for export
-    
-    # Grading Logic
-    for i, row in S['df'].iterrows():
-        user = S['answers'].get(i)
-        truth = str(row['Correct Answer'])
+    # 1. Sticky Header
+    st.markdown(f"""
+    <div class="sticky-header">
+        <div class="header-title">⚡ FastExam</div>
+        <div class="header-timer" id="timer">00:00</div>
+    </div>
+    <div class="header-spacer"></div>
+    <script>
+    var start = {st.session_state.start_time};
+    setInterval(function() {{
+        var now = new Date().getTime() / 1000;
+        var diff = Math.floor(now - start);
+        var m = Math.floor(diff / 60);
+        var s = Math.floor(diff % 60);
+        document.getElementById("timer").innerHTML = 
+            (m<10?"0"+m:m) + ":" + (s<10?"0"+s:s);
+    }}, 1000);
+    </script>
+    """, unsafe_allow_html=True)
+
+    # 2. Huge Form
+    with st.form("exam_form"):
+        user_answers = {}
         
-        # Normalize for comparison (trim strings)
-        is_right = False
-        if user and str(user).strip() == truth.strip():
-            is_right = True
-            correct += 1
+        for idx, row in df.iterrows():
+            st.markdown(f"""<div class="q-container"><div class="q-title">{idx+1}. {row['Question']}</div>""", unsafe_allow_html=True)
             
-        results_detail[i] = {
-            'user_ans': user if user else "Skipped",
-            'correct': is_right
+            # Clean options
+            opts = [str(row.get(c)) for c in ['Option A', 'Option B', 'Option C', 'Option D'] if pd.notna(row.get(c))]
+            opts = [o for o in opts if o != 'None']
+            
+            user_answers[idx] = st.radio(
+                "Select Answer", 
+                opts, 
+                index=None, 
+                key=f"q_{idx}", 
+                label_visibility="collapsed"
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+        submitted = st.form_submit_button("✅ Submit All Answers", type="primary", use_container_width=True)
+        
+        if submitted:
+            st.session_state.results = user_answers
+            st.session_state.status = 'RESULT'
+            st.rerun()
+
+# --- PHASE 3: RESULTS & PDF ---
+elif st.session_state.status == 'RESULT':
+    st.title("📊 Results")
+    
+    df = st.session_state.df
+    answers = st.session_state.results
+    
+    score = 0
+    analysis = {}
+    
+    # Grading
+    for idx, row in df.iterrows():
+        u_ans = answers.get(idx)
+        c_ans = str(row['Correct Answer']).strip()
+        
+        # Normalize
+        u_str = str(u_ans).strip() if u_ans else "Skipped"
+        is_correct = (u_str == c_ans)
+        
+        if is_correct: score += 1
+        
+        analysis[idx] = {
+            'user_ans': u_str,
+            'is_correct': is_correct
         }
 
-    total = len(S['df'])
-    score_pct = (correct / total) * 100
-    
-    # 1. Score Cards
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Score", f"{correct} / {total}")
-    c2.metric("Percentage", f"{score_pct:.1f}%")
-    
-    grade = "F"
-    if score_pct >= 80: grade = "A+"
-    elif score_pct >= 60: grade = "B"
-    elif score_pct >= 40: grade = "C"
-    c3.metric("Grade", grade)
-    
-    if score_pct > 70: st.balloons()
+    # Display Score
+    pct = (score / len(df)) * 100
+    color = "green" if pct >= 50 else "red"
+    st.markdown(f"""
+    <div style="text-align:center; padding: 20px; background:#f0f2f6; border-radius:10px;">
+        <h1 style="color:{color}; font-size:40px; margin:0;">{pct:.1f}%</h1>
+        <p>Scored {score} out of {len(df)}</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # 2. PDF EXPORT (Wrong Answers)
     st.write("---")
-    st.subheader("📥 Downloads")
     
+    # PDF Button
     if HAS_PDF_LIB:
-        col_pdf, col_csv = st.columns(2)
-        with col_pdf:
-            pdf_bytes = generate_error_pdf(results_detail, S['df'])
-            if pdf_bytes:
-                st.download_button(
-                    label="📄 Download Correction Report (PDF)",
-                    data=pdf_bytes,
-                    file_name="exam_corrections.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+        pdf_data = generate_wrong_answers_pdf(analysis, df)
+        if pdf_data:
+            st.download_button(
+                label="📥 Download Wrong Answers (PDF)",
+                data=pdf_data,
+                file_name="FastExam_Review.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary"
+            )
     else:
-        st.warning("Install 'fpdf' (pip install fpdf) to enable PDF exports.")
+        st.warning("Install 'fpdf' library to enable PDF export.")
 
-    # 3. Detailed Review UI
-    with st.expander("🔍 View Detailed Analysis"):
-        for i, row in S['df'].iterrows():
-            res = results_detail[i]
-            color = "#238636" if res['correct'] else "#da3633"
-            icon = "✅" if res['correct'] else "❌"
-            
-            st.markdown(f"""
-            <div style="border-left: 5px solid {color}; padding-left: 15px; margin-bottom: 15px; background: #161b22; padding: 10px; border-radius: 0 10px 10px 0;">
-                <div style="color: #ffffff; font-weight: bold;">{icon} Q{i+1}: {row['Question']}</div>
-                <div style="display: flex; gap: 20px; margin-top: 5px; font-size: 14px;">
-                    <span style="color: #8b949e;">Your Answer: <b style="color:{color}">{res['user_ans']}</b></span>
-                    <span style="color: #8b949e;">Correct: <b>{row['Correct Answer']}</b></span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-    if st.button("🔄 Start New Exam", use_container_width=True):
-        st.session_state.clear()
+    # Reset
+    if st.button("Start Over", use_container_width=True):
+        st.session_state.status = 'UPLOAD'
+        st.session_state.df = None
         st.rerun()
+
+# --- FOOTER ---
+st.markdown("<div class='imran-footer'>Made by Imran</div>", unsafe_allow_html=True)
